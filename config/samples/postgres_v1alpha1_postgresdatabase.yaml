@@ -1,0 +1,16 @@
+apiVersion: postgres.crds.lunarys.lab/v1alpha1
+kind: PostgresDatabase
+metadata:
+  labels:
+    app.kubernetes.io/name: postgresdb-user-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: myapp
+spec:
+  clusterRef:
+    name: my-cnpg-cluster
+    namespace: cnpg-system
+  # All optional — defaults to CR name:
+  # databaseName: myapp
+  # username: myapp
+  # secretName: myapp-pgcreds
+  # deletionPolicy: Retain
