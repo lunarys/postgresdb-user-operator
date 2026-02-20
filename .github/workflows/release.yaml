@@ -42,6 +42,6 @@ jobs:
         run: |
           helm package chart/ \
             --version "${{ steps.ver.outputs.semver }}" \
-            --app-version "${{ steps.ver.outputs.tag }}"
+            --app-version "${{ steps.ver.outputs.semver }}"
           helm push postgresdb-user-operator-${{ steps.ver.outputs.semver }}.tgz \
             oci://ghcr.io/lunarys/charts
