@@ -191,10 +191,13 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+HELMIFY ?= $(LOCALBIN)/helmify
+HELM ?= helm
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.7.1
 CONTROLLER_TOOLS_VERSION ?= v0.20.0
+HELMIFY_VERSION ?= v0.4.16
 
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \
@@ -207,6 +210,25 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
 GOLANGCI_LINT_VERSION ?= v2.7.2
+
+.PHONY: helm-generate
+helm-generate: manifests kustomize helmify ## Generate Helm chart from kustomize build output.
+	cd config/manager && "$(KUSTOMIZE)" edit set image controller=ghcr.io/lunarys/postgresdb-user-operator
+	"$(KUSTOMIZE)" build config/default | "$(HELMIFY)" chart
+	@# Clear the default tag so deployments use .Chart.AppVersion unless explicitly overridden
+	@sed -i 's/^\(\s*tag:\) latest$$/\1 ""/' chart/values.yaml
+	@# Patch deployment args to use the chart.managerArgs helper (includes conditional cluster flags)
+	@python3 -c "f='chart/templates/deployment.yaml'; c=open(f).read().replace('args: {{- toYaml .Values.controllerManager.manager.args | nindent 8 }}','args: {{- include \"chart.managerArgs\" . | nindent 8 }}'); open(f,'w').write(c)"
+	@# Prepend defaultCluster values block (idempotent)
+	@python3 -c "c=open('chart/values.yaml').read(); h='defaultCluster:\n  selector: \"\"\n  name: \"\"\n  namespace: \"\"\n\n'; open('chart/values.yaml','w').write(c if 'defaultCluster' in c else h+c)"
+	@# Drop redundant -controller-manager suffix from resource names (labels are unaffected)
+	@sed -i 's/}}-controller-manager-metrics-service/}}-metrics-service/g; s/}}-controller-manager/}}/g' chart/templates/*.yaml
+
+.PHONY: helmify
+helmify: $(HELMIFY) ## Download helmify locally if necessary.
+$(HELMIFY): $(LOCALBIN)
+	$(call go-install-tool,$(HELMIFY),github.com/arttor/helmify/cmd/helmify,$(HELMIFY_VERSION))
+
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)

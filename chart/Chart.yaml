@@ -1,0 +1,8 @@
+apiVersion: v2
+name: postgresdb-user-operator
+description: Operator that provisions PostgreSQL databases and users via CloudNativePG
+type: application
+# version and appVersion are overridden at package time by CI:
+#   helm package --version $SEMVER --app-version $TAG
+version: 0.0.0-dev
+appVersion: "v0.0.0-dev"
