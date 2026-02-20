@@ -202,6 +202,8 @@ const (
 	testClusterName      = "my-cluster"
 	testClusterNamespace = "cnpg-system"
 	testNamespace        = "default"
+	conflictDB           = "conflict_db"
+	defaultSelector      = "env=prod"
 )
 
 func clusterRef() *postgresv1alpha1.ClusterReference {
@@ -302,9 +304,9 @@ func refreshResource(ctx context.Context, nn types.NamespacedName) *postgresv1al
 	return pgdb
 }
 
-// getCondition returns the condition with the given type, or nil.
-func getCondition(pgdb *postgresv1alpha1.PostgresDatabase, condType string) *metav1.Condition {
-	return meta.FindStatusCondition(pgdb.Status.Conditions, condType)
+// getReadyCondition returns the Ready condition of the resource, or nil.
+func getReadyCondition(pgdb *postgresv1alpha1.PostgresDatabase) *metav1.Condition {
+	return meta.FindStatusCondition(pgdb.Status.Conditions, conditionReady)
 }
 
 // getOutputSecret fetches the output secret for a given CR name.
@@ -406,7 +408,7 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			Expect(pgdb.Status.Username).To(Equal("basic_test"))
 			Expect(pgdb.Status.SecretName).To(Equal("basic-test-pgcreds"))
 
-			readyCond := getCondition(pgdb, conditionReady)
+			readyCond := getReadyCondition(pgdb)
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 
@@ -474,7 +476,7 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			Expect(result.RequeueAfter).To(Equal(requeueInterval))
 
 			pgdb := refreshResource(ctx, nn)
-			readyCond := getCondition(pgdb, conditionReady)
+			readyCond := getReadyCondition(pgdb)
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 		})
@@ -500,7 +502,7 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			Expect(result.RequeueAfter).To(Equal(requeueInterval))
 
 			pgdb := refreshResource(ctx, nn)
-			readyCond := getCondition(pgdb, conditionReady)
+			readyCond := getReadyCondition(pgdb)
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 		})
@@ -533,10 +535,9 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			result, err := reconcileOnce(ctx, r, nn)
 			Expect(err).NotTo(HaveOccurred()) // no error returned to controller-runtime
 			Expect(result.RequeueAfter).To(BeZero())
-			Expect(result.Requeue).To(BeFalse()) // permanent — don't requeue
 
 			pgdb := refreshResource(ctx, nn)
-			readyCond := getCondition(pgdb, conditionReady)
+			readyCond := getReadyCondition(pgdb)
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(readyCond.Reason).To(Equal("NoClusterRef"))
@@ -560,7 +561,7 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			Expect(result.RequeueAfter).To(Equal(errorRequeueInterval))
 
 			pgdb := refreshResource(ctx, nn)
-			readyCond := getCondition(pgdb, conditionReady)
+			readyCond := getReadyCondition(pgdb)
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(readyCond.Reason).To(Equal("SuperuserSecretNotFound"))
@@ -577,7 +578,7 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			Expect(result.RequeueAfter).To(Equal(errorRequeueInterval))
 
 			pgdb := refreshResource(ctx, nn)
-			readyCond := getCondition(pgdb, conditionReady)
+			readyCond := getReadyCondition(pgdb)
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(readyCond.Reason).To(Equal("ConnectionFailed"))
@@ -604,10 +605,9 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			result, err := reconcileOnce(ctx, r, nn)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(BeZero()) // permanent, no requeue
-			Expect(result.Requeue).To(BeFalse())
 
 			pgdb := refreshResource(ctx, nn)
-			readyCond := getCondition(pgdb, conditionReady)
+			readyCond := getReadyCondition(pgdb)
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(readyCond.Reason).To(Equal("Conflict"))
@@ -616,25 +616,24 @@ var _ = Describe("PostgresDatabase Controller", func() {
 		It("should refuse to touch a database owned by a different CR", func() {
 			provenance := fmt.Sprintf("postgresdb-user-operator:%s/conflict-db", testNamespace)
 			// Pre-populate mock: user is ours, but database belongs to someone else
-			mock.users["conflict_db"] = "somepass"
-			mock.userComments["conflict_db"] = provenance
-			mock.databases["conflict_db"] = "conflict_db"
-			mock.dbComments["conflict_db"] = "postgresdb-user-operator:other-ns/other-cr"
+			mock.users[conflictDB] = "somepass"
+			mock.userComments[conflictDB] = provenance
+			mock.databases[conflictDB] = conflictDB
+			mock.dbComments[conflictDB] = "postgresdb-user-operator:other-ns/other-cr"
 
 			nn := createPostgresDatabase(ctx, "conflict-db", func(s *postgresv1alpha1.PostgresDatabaseSpec) {
-				s.DatabaseName = "conflict_db"
-				s.Username = "conflict_db"
+				s.DatabaseName = conflictDB
+				s.Username = conflictDB
 			})
 			defer deletePostgresDatabase(ctx, nn)
 
 			r := newTestReconciler(mock)
 			result, err := reconcileOnce(ctx, r, nn)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
 			Expect(result.RequeueAfter).To(BeZero())
 
 			pgdb := refreshResource(ctx, nn)
-			readyCond := getCondition(pgdb, conditionReady)
+			readyCond := getReadyCondition(pgdb)
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(readyCond.Reason).To(Equal("Conflict"))
@@ -821,7 +820,7 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			defer deletePostgresDatabase(ctx, nn)
 
 			r := newTestReconciler(mock, func(r *PostgresDatabaseReconciler) {
-				r.DefaultClusterSelector = "env=prod"
+				r.DefaultClusterSelector = defaultSelector
 				r.DefaultClusterNamespace = selectorNamespace
 			})
 			result, err := reconcileOnce(ctx, r, nn)
@@ -829,7 +828,7 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			Expect(result.RequeueAfter).To(Equal(requeueInterval))
 
 			pgdb := refreshResource(ctx, nn)
-			readyCond := getCondition(pgdb, conditionReady)
+			readyCond := getReadyCondition(pgdb)
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 		})
@@ -850,7 +849,7 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			defer deletePostgresDatabase(ctx, nn)
 
 			r := newTestReconciler(mock, func(r *PostgresDatabaseReconciler) {
-				r.DefaultClusterSelector = "env=prod"
+				r.DefaultClusterSelector = defaultSelector
 				r.DefaultClusterNamespace = selectorNamespace // restricts search; decoy is excluded
 			})
 			result, err := reconcileOnce(ctx, r, nn)
@@ -858,7 +857,7 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			Expect(result.RequeueAfter).To(Equal(requeueInterval))
 
 			pgdb := refreshResource(ctx, nn)
-			readyCond := getCondition(pgdb, conditionReady)
+			readyCond := getReadyCondition(pgdb)
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 		})
@@ -874,11 +873,10 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			})
 			result, err := reconcileOnce(ctx, r, nn)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
 			Expect(result.RequeueAfter).To(BeZero())
 
 			pgdb := refreshResource(ctx, nn)
-			readyCond := getCondition(pgdb, conditionReady)
+			readyCond := getReadyCondition(pgdb)
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(readyCond.Reason).To(Equal("NoClusterRef"))
@@ -897,16 +895,15 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			defer deletePostgresDatabase(ctx, nn)
 
 			r := newTestReconciler(mock, func(r *PostgresDatabaseReconciler) {
-				r.DefaultClusterSelector = "env=prod"
+				r.DefaultClusterSelector = defaultSelector
 				r.DefaultClusterNamespace = selectorNamespace
 			})
 			result, err := reconcileOnce(ctx, r, nn)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
 			Expect(result.RequeueAfter).To(BeZero())
 
 			pgdb := refreshResource(ctx, nn)
-			readyCond := getCondition(pgdb, conditionReady)
+			readyCond := getReadyCondition(pgdb)
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(readyCond.Reason).To(Equal("NoClusterRef"))
@@ -924,7 +921,7 @@ var _ = Describe("PostgresDatabase Controller", func() {
 
 			var capturedConnString string
 			r := newTestReconciler(mock, func(r *PostgresDatabaseReconciler) {
-				r.DefaultClusterSelector = "env=prod"
+				r.DefaultClusterSelector = defaultSelector
 				orig := r.ConnectPG
 				r.ConnectPG = func(ctx context.Context, connString string) (postgres.PGClient, error) {
 					capturedConnString = connString

@@ -202,7 +202,7 @@ func main() {
 	if err := (&controller.PostgresDatabaseReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("postgresdatabase-controller"),
+		Recorder: mgr.GetEventRecorderFor("postgresdatabase-controller"), //nolint:staticcheck
 		ConnectPG: func(ctx context.Context, connString string) (postgres.PGClient, error) {
 			return postgres.NewClient(ctx, connString)
 		},
