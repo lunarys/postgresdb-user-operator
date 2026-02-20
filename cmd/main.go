@@ -66,6 +66,7 @@ func main() {
 	var namespacePrefix bool
 	var defaultClusterName string
 	var defaultClusterNamespace string
+	var defaultClusterSelector string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -90,6 +91,10 @@ func main() {
 		"Default CNPG cluster name used when a PostgresDatabase CR omits spec.clusterRef.")
 	flag.StringVar(&defaultClusterNamespace, "default-cluster-namespace", "",
 		"Default CNPG cluster namespace used when a PostgresDatabase CR omits spec.clusterRef.")
+	flag.StringVar(&defaultClusterSelector, "default-cluster-selector", "",
+		"Label selector to find the default CNPG cluster when a PostgresDatabase CR omits spec.clusterRef "+
+			"(e.g. \"env=prod,app=postgres\"). Mutually exclusive with --default-cluster-name. "+
+			"Combine with --default-cluster-namespace to restrict the search to one namespace.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -97,6 +102,11 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	if defaultClusterSelector != "" && defaultClusterName != "" {
+		setupLog.Error(nil, "--default-cluster-selector and --default-cluster-name are mutually exclusive")
+		os.Exit(1)
+	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -199,6 +209,7 @@ func main() {
 		NamespacePrefix:         namespacePrefix,
 		DefaultClusterName:      defaultClusterName,
 		DefaultClusterNamespace: defaultClusterNamespace,
+		DefaultClusterSelector:  defaultClusterSelector,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PostgresDatabase")
 		os.Exit(1)

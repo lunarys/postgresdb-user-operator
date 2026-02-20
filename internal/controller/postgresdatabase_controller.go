@@ -27,7 +27,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -66,6 +69,7 @@ type PostgresDatabaseReconciler struct {
 	NamespacePrefix         bool
 	DefaultClusterName      string
 	DefaultClusterNamespace string
+	DefaultClusterSelector  string
 }
 
 // +kubebuilder:rbac:groups=postgres.crds.lunarys.lab,resources=postgresdatabases,verbs=get;list;watch;create;update;patch;delete
@@ -73,6 +77,7 @@ type PostgresDatabaseReconciler struct {
 // +kubebuilder:rbac:groups=postgres.crds.lunarys.lab,resources=postgresdatabases/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch
 
 func (r *PostgresDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -87,7 +92,7 @@ func (r *PostgresDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	// Resolve effective cluster reference
-	clusterRef, err := r.resolveClusterRef(pgdb)
+	clusterRef, err := r.resolveClusterRef(ctx, pgdb)
 	if err != nil {
 		log.Error(err, "no cluster reference configured")
 		r.setNotReadyCondition(ctx, pgdb, "NoClusterRef", err.Error())
@@ -392,9 +397,12 @@ func (r *PostgresDatabaseReconciler) cleanupPostgresResources(
 
 // resolveClusterRef returns the effective cluster reference for the CR,
 // falling back to the operator's default if the CR omits clusterRef.
-func (r *PostgresDatabaseReconciler) resolveClusterRef(pgdb *postgresv1alpha1.PostgresDatabase) (postgresv1alpha1.ClusterReference, error) {
+func (r *PostgresDatabaseReconciler) resolveClusterRef(ctx context.Context, pgdb *postgresv1alpha1.PostgresDatabase) (postgresv1alpha1.ClusterReference, error) {
 	if pgdb.Spec.ClusterRef != nil {
 		return *pgdb.Spec.ClusterRef, nil
+	}
+	if r.DefaultClusterSelector != "" {
+		return r.findClusterBySelector(ctx)
 	}
 	if r.DefaultClusterName != "" && r.DefaultClusterNamespace != "" {
 		return postgresv1alpha1.ClusterReference{
@@ -403,7 +411,41 @@ func (r *PostgresDatabaseReconciler) resolveClusterRef(pgdb *postgresv1alpha1.Po
 		}, nil
 	}
 	return postgresv1alpha1.ClusterReference{}, fmt.Errorf(
-		"spec.clusterRef is not set and no default cluster is configured (use --default-cluster-name and --default-cluster-namespace)")
+		"spec.clusterRef is not set and no default cluster is configured (use --default-cluster-name and --default-cluster-namespace, or --default-cluster-selector)")
+}
+
+// findClusterBySelector lists CNPG Cluster resources matching DefaultClusterSelector
+// and returns the cluster reference if exactly one match is found.
+func (r *PostgresDatabaseReconciler) findClusterBySelector(ctx context.Context) (postgresv1alpha1.ClusterReference, error) {
+	sel, err := labels.Parse(r.DefaultClusterSelector)
+	if err != nil {
+		return postgresv1alpha1.ClusterReference{}, fmt.Errorf("invalid --default-cluster-selector %q: %w", r.DefaultClusterSelector, err)
+	}
+
+	clusterList := &unstructured.UnstructuredList{}
+	clusterList.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "postgresql.cnpg.io",
+		Version: "v1",
+		Kind:    "ClusterList",
+	})
+	listOpts := []client.ListOption{client.MatchingLabelsSelector{Selector: sel}}
+	if r.DefaultClusterNamespace != "" {
+		listOpts = append(listOpts, client.InNamespace(r.DefaultClusterNamespace))
+	}
+	if err := r.List(ctx, clusterList, listOpts...); err != nil {
+		return postgresv1alpha1.ClusterReference{}, fmt.Errorf("listing CNPG clusters: %w", err)
+	}
+
+	switch len(clusterList.Items) {
+	case 0:
+		return postgresv1alpha1.ClusterReference{}, fmt.Errorf("no CNPG cluster found matching selector %q", r.DefaultClusterSelector)
+	case 1:
+		c := clusterList.Items[0]
+		return postgresv1alpha1.ClusterReference{Name: c.GetName(), Namespace: c.GetNamespace()}, nil
+	default:
+		return postgresv1alpha1.ClusterReference{}, fmt.Errorf(
+			"selector %q must be unambiguous: found %d CNPG clusters", r.DefaultClusterSelector, len(clusterList.Items))
+	}
 }
 
 // connectToCluster reads the superuser secret and opens a connection to the PostgreSQL cluster.

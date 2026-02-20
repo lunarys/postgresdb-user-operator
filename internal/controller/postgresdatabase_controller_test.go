@@ -27,6 +27,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -316,6 +318,52 @@ func getOutputSecret(ctx context.Context, crName string) *corev1.Secret {
 	return secret
 }
 
+// cnpgClusterGVK is the GVK for a CNPG Cluster object.
+var cnpgClusterGVK = schema.GroupVersionKind{
+	Group:   "postgresql.cnpg.io",
+	Version: "v1",
+	Kind:    "Cluster",
+}
+
+// createCNPGCluster creates a minimal unstructured CNPG Cluster object in envtest
+// with the given name, namespace, and labels.
+func createCNPGCluster(ctx context.Context, name, namespace string, lbls map[string]string) {
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
+	_ = k8sClient.Create(ctx, ns)
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(cnpgClusterGVK)
+	obj.SetName(name)
+	obj.SetNamespace(namespace)
+	obj.SetLabels(lbls)
+	Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, obj))).To(Succeed())
+}
+
+// deleteCNPGCluster removes a CNPG Cluster object.
+func deleteCNPGCluster(ctx context.Context, name, namespace string) {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(cnpgClusterGVK)
+	obj.SetName(name)
+	obj.SetNamespace(namespace)
+	_ = client.IgnoreNotFound(k8sClient.Delete(ctx, obj))
+}
+
+// createSuperuserSecretFor creates a CNPG superuser secret for a cluster other than the default test cluster.
+func createSuperuserSecretFor(ctx context.Context, clusterName, namespace string) {
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
+	_ = k8sClient.Create(ctx, ns)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      clusterName + "-superuser",
+			Namespace: namespace,
+		},
+		Data: map[string][]byte{
+			"username": []byte("postgres"),
+			"password": []byte("supersecret"),
+		},
+	}
+	Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, secret))).To(Succeed())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -420,6 +468,32 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			r := newTestReconciler(mock, func(r *PostgresDatabaseReconciler) {
 				r.DefaultClusterName = testClusterName
 				r.DefaultClusterNamespace = testClusterNamespace
+			})
+			result, err := reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(requeueInterval))
+
+			pgdb := refreshResource(ctx, nn)
+			readyCond := getCondition(pgdb, conditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should use the default cluster selector when clusterRef is omitted", func() {
+			const selectorCluster = "selector-cluster"
+			const selectorNamespace = "selector-ns"
+
+			createCNPGCluster(ctx, selectorCluster, selectorNamespace, map[string]string{"env": "selector-test"})
+			defer deleteCNPGCluster(ctx, selectorCluster, selectorNamespace)
+			createSuperuserSecretFor(ctx, selectorCluster, selectorNamespace)
+
+			nn := createPostgresDatabase(ctx, "selector-cluster-test", func(s *postgresv1alpha1.PostgresDatabaseSpec) {
+				s.ClusterRef = nil
+			})
+			defer deletePostgresDatabase(ctx, nn)
+
+			r := newTestReconciler(mock, func(r *PostgresDatabaseReconciler) {
+				r.DefaultClusterSelector = "env=selector-test"
 			})
 			result, err := reconcileOnce(ctx, r, nn)
 			Expect(err).NotTo(HaveOccurred())
@@ -725,6 +799,146 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			// Labels
 			Expect(secret.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "postgresdb-user-operator"))
 			Expect(secret.Labels).To(HaveKeyWithValue("postgres.crds.lunarys.lab/postgresdatabase", "secret-format"))
+		})
+	})
+
+	// -----------------------------------------------------------------------
+	// Default cluster selector resolution
+	// -----------------------------------------------------------------------
+	Describe("Default cluster selector resolution", func() {
+
+		const selectorClusterName = "selector-cluster"
+		const selectorNamespace = "selector-ns"
+
+		It("should resolve the cluster when exactly one match is found", func() {
+			createCNPGCluster(ctx, selectorClusterName, selectorNamespace, map[string]string{"env": "prod"})
+			defer deleteCNPGCluster(ctx, selectorClusterName, selectorNamespace)
+			createSuperuserSecretFor(ctx, selectorClusterName, selectorNamespace)
+
+			nn := createPostgresDatabase(ctx, "selector-one-match", func(s *postgresv1alpha1.PostgresDatabaseSpec) {
+				s.ClusterRef = nil
+			})
+			defer deletePostgresDatabase(ctx, nn)
+
+			r := newTestReconciler(mock, func(r *PostgresDatabaseReconciler) {
+				r.DefaultClusterSelector = "env=prod"
+				r.DefaultClusterNamespace = selectorNamespace
+			})
+			result, err := reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(requeueInterval))
+
+			pgdb := refreshResource(ctx, nn)
+			readyCond := getCondition(pgdb, conditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should scope the selector search to DefaultClusterNamespace, ignoring clusters in other namespaces", func() {
+			// Target cluster in selectorNamespace
+			createCNPGCluster(ctx, selectorClusterName, selectorNamespace, map[string]string{"env": "prod"})
+			defer deleteCNPGCluster(ctx, selectorClusterName, selectorNamespace)
+			createSuperuserSecretFor(ctx, selectorClusterName, selectorNamespace)
+
+			// Decoy cluster in another namespace with the same label
+			createCNPGCluster(ctx, "decoy-cluster", "default", map[string]string{"env": "prod"})
+			defer deleteCNPGCluster(ctx, "decoy-cluster", "default")
+
+			nn := createPostgresDatabase(ctx, "selector-scoped", func(s *postgresv1alpha1.PostgresDatabaseSpec) {
+				s.ClusterRef = nil
+			})
+			defer deletePostgresDatabase(ctx, nn)
+
+			r := newTestReconciler(mock, func(r *PostgresDatabaseReconciler) {
+				r.DefaultClusterSelector = "env=prod"
+				r.DefaultClusterNamespace = selectorNamespace // restricts search; decoy is excluded
+			})
+			result, err := reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(requeueInterval))
+
+			pgdb := refreshResource(ctx, nn)
+			readyCond := getCondition(pgdb, conditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should report a permanent error when the selector matches zero clusters", func() {
+			nn := createPostgresDatabase(ctx, "selector-no-match", func(s *postgresv1alpha1.PostgresDatabaseSpec) {
+				s.ClusterRef = nil
+			})
+			defer deletePostgresDatabase(ctx, nn)
+
+			r := newTestReconciler(mock, func(r *PostgresDatabaseReconciler) {
+				r.DefaultClusterSelector = "env=nonexistent"
+			})
+			result, err := reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
+
+			pgdb := refreshResource(ctx, nn)
+			readyCond := getCondition(pgdb, conditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCond.Reason).To(Equal("NoClusterRef"))
+			Expect(readyCond.Message).To(ContainSubstring("no CNPG cluster found"))
+		})
+
+		It("should report a permanent error when the selector matches more than one cluster", func() {
+			createCNPGCluster(ctx, "cluster-a", selectorNamespace, map[string]string{"env": "prod"})
+			defer deleteCNPGCluster(ctx, "cluster-a", selectorNamespace)
+			createCNPGCluster(ctx, "cluster-b", selectorNamespace, map[string]string{"env": "prod"})
+			defer deleteCNPGCluster(ctx, "cluster-b", selectorNamespace)
+
+			nn := createPostgresDatabase(ctx, "selector-ambiguous", func(s *postgresv1alpha1.PostgresDatabaseSpec) {
+				s.ClusterRef = nil
+			})
+			defer deletePostgresDatabase(ctx, nn)
+
+			r := newTestReconciler(mock, func(r *PostgresDatabaseReconciler) {
+				r.DefaultClusterSelector = "env=prod"
+				r.DefaultClusterNamespace = selectorNamespace
+			})
+			result, err := reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
+
+			pgdb := refreshResource(ctx, nn)
+			readyCond := getCondition(pgdb, conditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCond.Reason).To(Equal("NoClusterRef"))
+			Expect(readyCond.Message).To(ContainSubstring("must be unambiguous"))
+		})
+
+		It("should prefer spec.clusterRef over the selector when both are configured", func() {
+			// Selector cluster exists in selectorNamespace
+			createCNPGCluster(ctx, selectorClusterName, selectorNamespace, map[string]string{"env": "prod"})
+			defer deleteCNPGCluster(ctx, selectorClusterName, selectorNamespace)
+
+			// CR has an explicit clusterRef pointing at testClusterName
+			nn := createPostgresDatabase(ctx, "selector-explicit-wins") // uses default clusterRef()
+			defer deletePostgresDatabase(ctx, nn)
+
+			var capturedConnString string
+			r := newTestReconciler(mock, func(r *PostgresDatabaseReconciler) {
+				r.DefaultClusterSelector = "env=prod"
+				orig := r.ConnectPG
+				r.ConnectPG = func(ctx context.Context, connString string) (postgres.PGClient, error) {
+					capturedConnString = connString
+					return orig(ctx, connString)
+				}
+			})
+
+			_, err := reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Connection string must use testClusterName (from spec.clusterRef), not selectorClusterName
+			Expect(capturedConnString).To(ContainSubstring(
+				fmt.Sprintf("%s-rw.%s.svc.cluster.local", testClusterName, testClusterNamespace)))
+			Expect(capturedConnString).NotTo(ContainSubstring(selectorClusterName))
 		})
 	})
 })
