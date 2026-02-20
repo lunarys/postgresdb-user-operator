@@ -1,135 +1,89 @@
 # postgresdb-user-operator
-// TODO(user): Add simple overview of use/purpose
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+A Kubernetes operator that provisions PostgreSQL databases and users via [CloudNativePG](https://cloudnative-pg.io/). Declare a `PostgresDatabase` resource and the operator creates the database, a dedicated user, and a connection-credentials Secret.
 
-## Getting Started
+I created this operator because I use CloudNativePG for my homelab cluster, 
+and spinning up a separate CNPG cluster for every small use case is overkill. 
+Instead, this operator provisions isolated databases and users within a single shared cluster.
 
-### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+## Prerequisites
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+- Kubernetes v1.24+
+- [CloudNativePG](https://cloudnative-pg.io/) installed with at least one `Cluster` resource
 
-```sh
-make docker-build docker-push IMG=<some-registry>/postgresdb-user-operator:tag
-```
+## How it works
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+The operator connects to the CNPG cluster using its `<cluster-name>-superuser` Secret (created by CNPG) and the read-write service endpoint (`<cluster-name>-rw.<namespace>.svc.cluster.local:5432`). It then creates the database and user via SQL, and writes a credentials Secret whose keys match the format CNPG uses for its own app user secrets (`username`, `password`, `host`, `port`, `dbname`, `uri`, `jdbc-uri`, `pgpass`).
 
-**Install the CRDs into the cluster:**
+## Installation
+
+### Helm (recommended)
 
 ```sh
-make install
+helm install postgresdb-user-operator \
+  oci://ghcr.io/lunarys/charts/postgresdb-user-operator \
+  --version <version> \
+  --namespace postgresdb-user-operator-system \
+  --create-namespace \
+  --set defaultCluster.selector=environment=prod
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+Key values:
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `defaultCluster.selector` | `""` | Label selector to find the default CNPG cluster |
+| `defaultCluster.name` | `""` | Explicit default cluster name (mutually exclusive with `selector`) |
+| `defaultCluster.namespace` | `""` | Namespace scope for the selector search |
+| `controllerManager.manager.image.tag` | `""` | Image tag; defaults to the chart's `appVersion` |
+| `controllerManager.replicas` | `1` | Number of operator replicas |
+
+### kubectl / kustomize
 
 ```sh
-make deploy IMG=<some-registry>/postgresdb-user-operator:tag
+make install   # install CRDs
+make deploy IMG=ghcr.io/lunarys/postgresdb-user-operator:<tag>
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+## Usage
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
+Create a `PostgresDatabase` resource:
+
+```yaml
+apiVersion: postgres.crds.lunarys.lab/v1alpha1
+kind: PostgresDatabase
+metadata:
+  name: myapp
+  namespace: default
+spec:
+  # omit clusterRef to use the operator's configured default cluster
+  clusterRef:
+    name: my-pg-cluster
+    namespace: databases
+  databaseName: myapp_db   # optional; defaults to CR name with hyphens replaced by underscores
+  username: myapp_user     # optional; defaults to databaseName
+  secretName: myapp-pgcreds  # optional; defaults to <cr-name>-pgcreds
+  deletionPolicy: Retain   # Retain (default) or Delete
+```
+
+The operator creates:
+- The PostgreSQL database on the target CNPG cluster
+- A dedicated PostgreSQL user as the database owner
+- A Kubernetes Secret with keys matching CNPG's app-user secret format:
+  `username`, `password`, `host`, `port`, `dbname`, `uri`, `jdbc-uri`, `pgpass`
+
+Status is reflected via conditions (`Ready=True/False`) and printer columns visible in `kubectl get pgdb`.
+
+## Development
 
 ```sh
-kubectl apply -k config/samples/
+make test           # run unit tests
+make helm-generate  # regenerate chart/ from kustomize + apply patches
+make build          # build the manager binary
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
-```sh
-kubectl delete -k config/samples/
-```
-
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
-make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
-
-```sh
-make undeploy
-```
-
-## Project Distribution
-
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/postgresdb-user-operator:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/postgresdb-user-operator/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-kubebuilder edit --plugins=helm/v2-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+Run `make help` for all available targets.
 
 ## License
 
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+Copyright 2026. Licensed under the [Apache License, Version 2.0](LICENSE).
