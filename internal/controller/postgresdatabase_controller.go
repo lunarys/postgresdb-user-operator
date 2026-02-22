@@ -546,6 +546,15 @@ func buildSecretData(host, port, dbName, userName, password string) map[string][
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *PostgresDatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	log := logf.Log.WithName("setup")
+	if r.DefaultClusterSelector != "" {
+		log.Info("default cluster configured via selector", "selector", r.DefaultClusterSelector, "namespace", r.DefaultClusterNamespace)
+	} else if r.DefaultClusterName != "" {
+		log.Info("default cluster configured", "cluster", r.DefaultClusterName, "namespace", r.DefaultClusterNamespace)
+	} else {
+		log.Info("no default cluster configured; all CRs must specify spec.clusterRef")
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&postgresv1alpha1.PostgresDatabase{}).
 		Owns(&corev1.Secret{}).
