@@ -581,6 +581,8 @@ func (r *PostgresDatabaseReconciler) connectToCluster(
 	connString := fmt.Sprintf("postgres://%s:%s@%s:%s/postgres?sslmode=require",
 		url.QueryEscape(suUser), url.QueryEscape(suPass), host, port)
 
+	log := logf.FromContext(ctx)
+	log.Info("connecting to PostgreSQL", "host", host, "port", port)
 	pgClient, err := r.ConnectPG(ctx, connString)
 	if err != nil {
 		return nil, "", "", err
