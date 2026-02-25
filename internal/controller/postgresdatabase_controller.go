@@ -245,7 +245,18 @@ func (r *PostgresDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		Message: fmt.Sprintf("Database %q exists with owner %q", dbName, userName),
 	})
 
-	// 8. Create/update output secret
+	// 8. Create/update output secret; delete old secret if secretName changed
+	if prev := pgdb.Status.SecretName; prev != "" && prev != secretName {
+		old := &corev1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{Name: prev, Namespace: pgdb.Namespace}, old); err == nil {
+			if err := r.Delete(ctx, old); err != nil && !apierrors.IsNotFound(err) {
+				log.Error(err, "failed to delete old secret", "secret", prev)
+				r.setNotReadyCondition(ctx, pgdb, "SecretFailed",
+					fmt.Sprintf("Failed to delete old secret %q: %v", prev, err))
+				return ctrl.Result{RequeueAfter: errorRequeueInterval}, nil
+			}
+		}
+	}
 	if err := r.ensureSecret(ctx, pgdb, host, port, dbName, userName, password); err != nil {
 		log.Error(err, "failed to ensure output secret")
 		r.setNotReadyCondition(ctx, pgdb, "SecretFailed",

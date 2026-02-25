@@ -1096,5 +1096,32 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(readyCond.Reason).To(Equal("Conflict"))
 		})
+
+		It("should delete the old K8s Secret when spec.secretName changes", func() {
+			nn := createPostgresDatabase(ctx, "rename-secret")
+			defer deletePostgresDatabase(ctx, nn)
+
+			r := newTestReconciler(mock)
+			_, err := reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+
+			oldSecretNN := types.NamespacedName{Name: "rename-secret-pgcreds", Namespace: testNamespace}
+			Expect(k8sClient.Get(ctx, oldSecretNN, &corev1.Secret{})).To(Succeed())
+
+			pgdb := refreshResource(ctx, nn)
+			pgdb.Spec.SecretName = "new-creds"
+			Expect(k8sClient.Update(ctx, pgdb)).To(Succeed())
+
+			_, err = reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Old secret should be gone
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, oldSecretNN, &corev1.Secret{}))).To(BeTrue())
+
+			// New secret should exist with correct credentials
+			newSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "new-creds", Namespace: testNamespace}, newSecret)).To(Succeed())
+			Expect(string(newSecret.Data["username"])).To(Equal("rename_secret"))
+		})
 	})
 })
