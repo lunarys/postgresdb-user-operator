@@ -607,6 +607,47 @@ var _ = Describe("PostgresDatabase Controller", func() {
 	})
 
 	// -----------------------------------------------------------------------
+	// Custom superuser secret
+	// -----------------------------------------------------------------------
+	Describe("Custom superuser secret", func() {
+
+		It("should use spec.superuserSecret.name from the CNPG cluster when set", func() {
+			deleteSuperuserSecret(ctx) // remove default "my-cluster-superuser"
+
+			// Create CNPG cluster object with custom superuser secret name
+			obj := &unstructured.Unstructured{}
+			obj.SetGroupVersionKind(cnpgClusterGVK)
+			obj.SetName(testClusterName)
+			obj.SetNamespace(testClusterNamespace)
+			_ = unstructured.SetNestedField(obj.Object, "custom-su", "spec", "superuserSecret", "name")
+			Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, obj))).To(Succeed())
+			defer deleteCNPGCluster(ctx, testClusterName, testClusterNamespace)
+
+			// Create only the custom-named secret
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "custom-su", Namespace: testClusterNamespace},
+				Data: map[string][]byte{
+					"username": []byte("postgres"),
+					"password": []byte("supersecret"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+
+			nn := createPostgresDatabase(ctx, "custom-su-test")
+			defer deletePostgresDatabase(ctx, nn)
+
+			r := newTestReconciler(mock)
+			result, err := reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(requeueInterval))
+
+			pgdb := refreshResource(ctx, nn)
+			readyCond := getReadyCondition(pgdb)
+			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+		})
+	})
+
+	// -----------------------------------------------------------------------
 	// Provenance conflicts
 	// -----------------------------------------------------------------------
 	Describe("Provenance conflicts", func() {

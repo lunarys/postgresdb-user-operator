@@ -145,13 +145,9 @@ func (r *PostgresDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	pgClient, host, port, connectErr := r.connectToCluster(ctx, clusterRef)
 	if connectErr != nil {
 		if apierrors.IsNotFound(connectErr) {
-			suSecretName := clusterRef.Name + "-superuser"
-			log.Info("superuser secret not found, will retry",
-				"secret", suSecretName, "namespace", clusterRef.Namespace)
-			r.setNotReadyCondition(ctx, pgdb, "SuperuserSecretNotFound",
-				fmt.Sprintf("Secret %s/%s not found", clusterRef.Namespace, suSecretName))
-			r.Recorder.Eventf(pgdb, corev1.EventTypeWarning, "SuperuserSecretNotFound",
-				"Superuser secret %s/%s not found", clusterRef.Namespace, suSecretName)
+			log.Info("superuser secret not found, will retry", "error", connectErr)
+			r.setNotReadyCondition(ctx, pgdb, "SuperuserSecretNotFound", connectErr.Error())
+			r.Recorder.Eventf(pgdb, corev1.EventTypeWarning, "SuperuserSecretNotFound", "%v", connectErr)
 			return ctrl.Result{RequeueAfter: errorRequeueInterval}, nil
 		}
 		log.Error(connectErr, "failed to connect to PostgreSQL")
@@ -580,7 +576,19 @@ func (r *PostgresDatabaseReconciler) findClusterBySelector(ctx context.Context) 
 func (r *PostgresDatabaseReconciler) connectToCluster(
 	ctx context.Context, clusterRef postgresv1alpha1.ClusterReference,
 ) (postgres.PGClient, string, string, error) {
-	suSecretName := clusterRef.Name + "-superuser"
+	suSecretName := clusterRef.Name + "-superuser" // default
+
+	// Override with spec.superuserSecret.name if the CNPG Cluster object exists and has it set.
+	cluster := &unstructured.Unstructured{}
+	cluster.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: "postgresql.cnpg.io", Version: "v1", Kind: "Cluster",
+	})
+	if err := r.Get(ctx, types.NamespacedName{Name: clusterRef.Name, Namespace: clusterRef.Namespace}, cluster); err == nil {
+		if name, found, _ := unstructured.NestedString(cluster.Object, "spec", "superuserSecret", "name"); found && name != "" {
+			suSecretName = name
+		}
+	}
+
 	suSecret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{
 		Name:      suSecretName,
