@@ -123,6 +123,10 @@ func (r *PostgresDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				}
 				r.Recorder.Event(pgdb, corev1.EventTypeNormal, "CleanedUp",
 					"PostgreSQL database and user dropped")
+			} else {
+				log.Info("retaining PostgreSQL resources on delete", "database", dbName, "user", userName)
+				r.Recorder.Event(pgdb, corev1.EventTypeNormal, "Retained",
+					"PostgreSQL database and user retained (deletion policy is Retain)")
 			}
 
 			controllerutil.RemoveFinalizer(pgdb, finalizerName)
@@ -181,6 +185,8 @@ func (r *PostgresDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		log.Error(err, "failed to provision user", "username", userName)
 		r.setNotReadyCondition(ctx, pgdb, "UserProvisionFailed",
 			fmt.Sprintf("Failed to provision user %q: %v", userName, err))
+		r.Recorder.Eventf(pgdb, corev1.EventTypeWarning, "UserProvisionFailed",
+			"Failed to provision user %q: %v", userName, err)
 		return ctrl.Result{RequeueAfter: errorRequeueInterval}, nil
 	}
 	meta.SetStatusCondition(&pgdb.Status.Conditions, metav1.Condition{
@@ -202,6 +208,8 @@ func (r *PostgresDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		log.Error(err, "failed to provision database", "database", dbName)
 		r.setNotReadyCondition(ctx, pgdb, "DatabaseProvisionFailed",
 			fmt.Sprintf("Failed to provision database %q: %v", dbName, err))
+		r.Recorder.Eventf(pgdb, corev1.EventTypeWarning, "DatabaseProvisionFailed",
+			"Failed to provision database %q: %v", dbName, err)
 		return ctrl.Result{RequeueAfter: errorRequeueInterval}, nil
 	}
 	meta.SetStatusCondition(&pgdb.Status.Conditions, metav1.Condition{
@@ -221,6 +229,7 @@ func (r *PostgresDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Req
 					fmt.Sprintf("Failed to delete old secret %q: %v", prev, err))
 				return ctrl.Result{RequeueAfter: errorRequeueInterval}, nil
 			}
+			log.Info("deleted old secret after secretName change", "old", prev, "new", secretName)
 		}
 	}
 	if err := r.ensureSecret(ctx, pgdb, host, port, dbName, userName, password); err != nil {
@@ -299,15 +308,18 @@ func (r *PostgresDatabaseReconciler) ensureUser(
 		return "", fmt.Errorf("generating password: %w", err)
 	}
 
+	log := logf.FromContext(ctx)
 	if !exists {
 		if err := pgClient.CreateUser(ctx, userName, password, provenance); err != nil {
 			return "", err
 		}
+		log.Info("created PostgreSQL user", "username", userName)
 	} else {
 		// User exists (and provenance matched) but secret is gone — reset password
 		if err := pgClient.UpdatePassword(ctx, userName, password); err != nil {
 			return "", err
 		}
+		log.Info("reset password for PostgreSQL user (output secret was deleted)", "username", userName)
 	}
 
 	return password, nil
@@ -337,6 +349,8 @@ func (r *PostgresDatabaseReconciler) ensureDatabase(
 		if err := pgClient.CreateDatabase(ctx, dbName, owner, provenance); err != nil {
 			return err
 		}
+		log := logf.FromContext(ctx)
+		log.Info("created PostgreSQL database", "database", dbName, "owner", owner)
 	}
 
 	return nil
@@ -367,6 +381,8 @@ func (r *PostgresDatabaseReconciler) handleRenames(
 				fmt.Sprintf("Failed to rename user %q to %q: %v", prev, userName, err))
 			return ctrl.Result{RequeueAfter: errorRequeueInterval}, true
 		}
+		log.Info("renamed PostgreSQL user", "from", prev, "to", userName)
+		r.Recorder.Eventf(pgdb, corev1.EventTypeNormal, "Renamed", "Renamed user %q to %q", prev, userName)
 	}
 
 	if prev := pgdb.Status.DatabaseName; prev != "" && prev != dbName {
@@ -384,6 +400,8 @@ func (r *PostgresDatabaseReconciler) handleRenames(
 				fmt.Sprintf("Failed to rename database %q to %q: %v", prev, dbName, err))
 			return ctrl.Result{RequeueAfter: errorRequeueInterval}, true
 		}
+		log.Info("renamed PostgreSQL database", "from", prev, "to", dbName)
+		r.Recorder.Eventf(pgdb, corev1.EventTypeNormal, "Renamed", "Renamed database %q to %q", prev, dbName)
 	}
 
 	return ctrl.Result{}, false
