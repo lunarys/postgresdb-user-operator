@@ -168,38 +168,8 @@ func (r *PostgresDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	provenance := fmt.Sprintf("postgresdb-user-operator:%s/%s", pgdb.Namespace, pgdb.Name)
 
 	// 5. Handle renames: detect name changes since last provisioning
-	if prev := pgdb.Status.Username; prev != "" && prev != userName {
-		if err := r.handleUserRename(ctx, pgClient, prev, userName, provenance); err != nil {
-			var renameConflict *errRenameConflict
-			var notOwned *postgres.ErrNotOwned
-			if errors.As(err, &renameConflict) || errors.As(err, &notOwned) {
-				log.Error(err, "permanent conflict renaming user", "from", prev, "to", userName)
-				r.setNotReadyCondition(ctx, pgdb, "Conflict", err.Error())
-				r.Recorder.Eventf(pgdb, corev1.EventTypeWarning, "Conflict", "%v", err)
-				return ctrl.Result{}, nil
-			}
-			log.Error(err, "failed to rename user", "from", prev, "to", userName)
-			r.setNotReadyCondition(ctx, pgdb, "UserRenameFailed",
-				fmt.Sprintf("Failed to rename user %q to %q: %v", prev, userName, err))
-			return ctrl.Result{RequeueAfter: errorRequeueInterval}, nil
-		}
-	}
-
-	if prev := pgdb.Status.DatabaseName; prev != "" && prev != dbName {
-		if err := r.handleDatabaseRename(ctx, pgClient, prev, dbName, provenance); err != nil {
-			var renameConflict *errRenameConflict
-			var notOwned *postgres.ErrNotOwned
-			if errors.As(err, &renameConflict) || errors.As(err, &notOwned) {
-				log.Error(err, "permanent conflict renaming database", "from", prev, "to", dbName)
-				r.setNotReadyCondition(ctx, pgdb, "Conflict", err.Error())
-				r.Recorder.Eventf(pgdb, corev1.EventTypeWarning, "Conflict", "%v", err)
-				return ctrl.Result{}, nil
-			}
-			log.Error(err, "failed to rename database", "from", prev, "to", dbName)
-			r.setNotReadyCondition(ctx, pgdb, "DatabaseRenameFailed",
-				fmt.Sprintf("Failed to rename database %q to %q: %v", prev, dbName, err))
-			return ctrl.Result{RequeueAfter: errorRequeueInterval}, nil
-		}
+	if result, done := r.handleRenames(ctx, pgClient, pgdb, userName, dbName, provenance); done {
+		return result, nil
 	}
 
 	// 6. Provision user
@@ -374,6 +344,53 @@ func (r *PostgresDatabaseReconciler) ensureDatabase(
 	}
 
 	return nil
+}
+
+// handleRenames detects and applies user/database renames based on status vs resolved names.
+// Returns (result, true) when the caller should return early due to an error.
+func (r *PostgresDatabaseReconciler) handleRenames(
+	ctx context.Context,
+	pgClient postgres.PGClient,
+	pgdb *postgresv1alpha1.PostgresDatabase,
+	userName, dbName, provenance string,
+) (ctrl.Result, bool) {
+	log := logf.FromContext(ctx)
+
+	if prev := pgdb.Status.Username; prev != "" && prev != userName {
+		if err := r.handleUserRename(ctx, pgClient, prev, userName, provenance); err != nil {
+			var renameConflict *errRenameConflict
+			var notOwned *postgres.ErrNotOwned
+			if errors.As(err, &renameConflict) || errors.As(err, &notOwned) {
+				log.Error(err, "permanent conflict renaming user", "from", prev, "to", userName)
+				r.setNotReadyCondition(ctx, pgdb, "Conflict", err.Error())
+				r.Recorder.Eventf(pgdb, corev1.EventTypeWarning, "Conflict", "%v", err)
+				return ctrl.Result{}, true
+			}
+			log.Error(err, "failed to rename user", "from", prev, "to", userName)
+			r.setNotReadyCondition(ctx, pgdb, "UserRenameFailed",
+				fmt.Sprintf("Failed to rename user %q to %q: %v", prev, userName, err))
+			return ctrl.Result{RequeueAfter: errorRequeueInterval}, true
+		}
+	}
+
+	if prev := pgdb.Status.DatabaseName; prev != "" && prev != dbName {
+		if err := r.handleDatabaseRename(ctx, pgClient, prev, dbName, provenance); err != nil {
+			var renameConflict *errRenameConflict
+			var notOwned *postgres.ErrNotOwned
+			if errors.As(err, &renameConflict) || errors.As(err, &notOwned) {
+				log.Error(err, "permanent conflict renaming database", "from", prev, "to", dbName)
+				r.setNotReadyCondition(ctx, pgdb, "Conflict", err.Error())
+				r.Recorder.Eventf(pgdb, corev1.EventTypeWarning, "Conflict", "%v", err)
+				return ctrl.Result{}, true
+			}
+			log.Error(err, "failed to rename database", "from", prev, "to", dbName)
+			r.setNotReadyCondition(ctx, pgdb, "DatabaseRenameFailed",
+				fmt.Sprintf("Failed to rename database %q to %q: %v", prev, dbName, err))
+			return ctrl.Result{RequeueAfter: errorRequeueInterval}, true
+		}
+	}
+
+	return ctrl.Result{}, false
 }
 
 // errRenameConflict is returned when both old and new PG resource names exist simultaneously.

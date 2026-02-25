@@ -224,6 +224,7 @@ const (
 	testNamespace        = "default"
 	conflictDB           = "conflict_db"
 	defaultSelector      = "env=prod"
+	testPassword         = "somepass"
 )
 
 func clusterRef() *postgresv1alpha1.ClusterReference {
@@ -612,7 +613,7 @@ var _ = Describe("PostgresDatabase Controller", func() {
 
 		It("should refuse to touch a user owned by a different CR", func() {
 			// Pre-populate mock with a user owned by "other-cr"
-			mock.users["conflict_user"] = "somepass"
+			mock.users["conflict_user"] = testPassword
 			mock.userComments["conflict_user"] = "postgresdb-user-operator:other-ns/other-cr"
 
 			nn := createPostgresDatabase(ctx, "conflict-user", func(s *postgresv1alpha1.PostgresDatabaseSpec) {
@@ -636,7 +637,7 @@ var _ = Describe("PostgresDatabase Controller", func() {
 		It("should refuse to touch a database owned by a different CR", func() {
 			provenance := fmt.Sprintf("postgresdb-user-operator:%s/conflict-db", testNamespace)
 			// Pre-populate mock: user is ours, but database belongs to someone else
-			mock.users[conflictDB] = "somepass"
+			mock.users[conflictDB] = testPassword
 			mock.userComments[conflictDB] = provenance
 			mock.databases[conflictDB] = conflictDB
 			mock.dbComments[conflictDB] = "postgresdb-user-operator:other-ns/other-cr"
@@ -1079,7 +1080,7 @@ var _ = Describe("PostgresDatabase Controller", func() {
 
 			// Pre-seed the new name into the mock (collision)
 			provenance := fmt.Sprintf("postgresdb-user-operator:%s/rename-conflict", testNamespace)
-			mock.users["conflict_new"] = "somepass"
+			mock.users["conflict_new"] = testPassword
 			mock.userComments["conflict_new"] = provenance
 
 			pgdb := refreshResource(ctx, nn)
