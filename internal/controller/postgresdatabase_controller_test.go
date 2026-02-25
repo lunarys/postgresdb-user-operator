@@ -194,6 +194,26 @@ func (m *mockPGClient) DropUser(_ context.Context, username string) error {
 	return nil
 }
 
+func (m *mockPGClient) RenameUser(_ context.Context, oldName, newName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.users[newName] = m.users[oldName]
+	m.userComments[newName] = m.userComments[oldName]
+	delete(m.users, oldName)
+	delete(m.userComments, oldName)
+	return nil
+}
+
+func (m *mockPGClient) RenameDatabase(_ context.Context, oldName, newName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.databases[newName] = m.databases[oldName]
+	m.dbComments[newName] = m.dbComments[oldName]
+	delete(m.databases, oldName)
+	delete(m.dbComments, oldName)
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
@@ -936,6 +956,145 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			Expect(capturedConnString).To(ContainSubstring(
 				fmt.Sprintf("%s-rw.%s.svc.cluster.local", testClusterName, testClusterNamespace)))
 			Expect(capturedConnString).NotTo(ContainSubstring(selectorClusterName))
+		})
+	})
+
+	// -----------------------------------------------------------------------
+	// Renaming
+	// -----------------------------------------------------------------------
+	Describe("Renaming", func() {
+
+		It("should rename the PostgreSQL user when spec.username changes", func() {
+			nn := createPostgresDatabase(ctx, "rename-user")
+			defer deletePostgresDatabase(ctx, nn)
+
+			r := newTestReconciler(mock)
+			_, err := reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+
+			pgdb := refreshResource(ctx, nn)
+			pgdb.Spec.Username = "new_user"
+			Expect(k8sClient.Update(ctx, pgdb)).To(Succeed())
+
+			_, err = reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+
+			// New name exists in PG; old name is gone
+			Expect(mock.users).To(HaveKey("new_user"))
+			Expect(mock.users).NotTo(HaveKey("rename_user"))
+
+			// Status and secret reflect the new name
+			pgdb = refreshResource(ctx, nn)
+			Expect(pgdb.Status.Username).To(Equal("new_user"))
+			secret := getOutputSecret(ctx, "rename-user")
+			Expect(string(secret.Data["username"])).To(Equal("new_user"))
+		})
+
+		It("should rename the PostgreSQL database when spec.databaseName changes", func() {
+			nn := createPostgresDatabase(ctx, "rename-db")
+			defer deletePostgresDatabase(ctx, nn)
+
+			r := newTestReconciler(mock)
+			_, err := reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+
+			pgdb := refreshResource(ctx, nn)
+			pgdb.Spec.DatabaseName = "new_db"
+			Expect(k8sClient.Update(ctx, pgdb)).To(Succeed())
+
+			_, err = reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+
+			// New name exists in PG; old name is gone
+			Expect(mock.databases).To(HaveKey("new_db"))
+			Expect(mock.databases).NotTo(HaveKey("rename_db"))
+
+			// Status and secret reflect the new name
+			pgdb = refreshResource(ctx, nn)
+			Expect(pgdb.Status.DatabaseName).To(Equal("new_db"))
+			secret := getOutputSecret(ctx, "rename-db")
+			Expect(string(secret.Data["dbname"])).To(Equal("new_db"))
+		})
+
+		It("should rename both user and database simultaneously", func() {
+			nn := createPostgresDatabase(ctx, "rename-both")
+			defer deletePostgresDatabase(ctx, nn)
+
+			r := newTestReconciler(mock)
+			_, err := reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+
+			pgdb := refreshResource(ctx, nn)
+			pgdb.Spec.DatabaseName = "new_both_db"
+			pgdb.Spec.Username = "new_both_user"
+			Expect(k8sClient.Update(ctx, pgdb)).To(Succeed())
+
+			_, err = reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(mock.users).To(HaveKey("new_both_user"))
+			Expect(mock.users).NotTo(HaveKey("rename_both"))
+			Expect(mock.databases).To(HaveKey("new_both_db"))
+			Expect(mock.databases).NotTo(HaveKey("rename_both"))
+
+			pgdb = refreshResource(ctx, nn)
+			Expect(pgdb.Status.Username).To(Equal("new_both_user"))
+			Expect(pgdb.Status.DatabaseName).To(Equal("new_both_db"))
+		})
+
+		It("should remain ready and stable after a second reconcile following a rename", func() {
+			nn := createPostgresDatabase(ctx, "rename-idempotent")
+			defer deletePostgresDatabase(ctx, nn)
+
+			r := newTestReconciler(mock)
+			_, err := reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+
+			pgdb := refreshResource(ctx, nn)
+			pgdb.Spec.Username = "idempotent_new"
+			Expect(k8sClient.Update(ctx, pgdb)).To(Succeed())
+
+			_, err = reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Second reconcile — should stay ready, state unchanged
+			result, err := reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(requeueInterval))
+
+			pgdb = refreshResource(ctx, nn)
+			Expect(getReadyCondition(pgdb).Status).To(Equal(metav1.ConditionTrue))
+			Expect(pgdb.Status.Username).To(Equal("idempotent_new"))
+			Expect(mock.users).To(HaveKey("idempotent_new"))
+			Expect(mock.users).NotTo(HaveKey("rename_idempotent"))
+		})
+
+		It("should report a conflict error when both old and new user names exist", func() {
+			nn := createPostgresDatabase(ctx, "rename-conflict")
+			defer deletePostgresDatabase(ctx, nn)
+
+			r := newTestReconciler(mock)
+			_, err := reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Pre-seed the new name into the mock (collision)
+			provenance := fmt.Sprintf("postgresdb-user-operator:%s/rename-conflict", testNamespace)
+			mock.users["conflict_new"] = "somepass"
+			mock.userComments["conflict_new"] = provenance
+
+			pgdb := refreshResource(ctx, nn)
+			pgdb.Spec.Username = "conflict_new"
+			Expect(k8sClient.Update(ctx, pgdb)).To(Succeed())
+
+			result, err := reconcileOnce(ctx, r, nn)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeZero()) // permanent error
+
+			pgdb = refreshResource(ctx, nn)
+			readyCond := getReadyCondition(pgdb)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCond.Reason).To(Equal("Conflict"))
 		})
 	})
 })

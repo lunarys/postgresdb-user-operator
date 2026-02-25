@@ -167,6 +167,41 @@ func (r *PostgresDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Provenance tag to track ownership of PG resources
 	provenance := fmt.Sprintf("postgresdb-user-operator:%s/%s", pgdb.Namespace, pgdb.Name)
 
+	// 5. Handle renames: detect name changes since last provisioning
+	if prev := pgdb.Status.Username; prev != "" && prev != userName {
+		if err := r.handleUserRename(ctx, pgClient, prev, userName, provenance); err != nil {
+			var renameConflict *errRenameConflict
+			var notOwned *postgres.ErrNotOwned
+			if errors.As(err, &renameConflict) || errors.As(err, &notOwned) {
+				log.Error(err, "permanent conflict renaming user", "from", prev, "to", userName)
+				r.setNotReadyCondition(ctx, pgdb, "Conflict", err.Error())
+				r.Recorder.Eventf(pgdb, corev1.EventTypeWarning, "Conflict", "%v", err)
+				return ctrl.Result{}, nil
+			}
+			log.Error(err, "failed to rename user", "from", prev, "to", userName)
+			r.setNotReadyCondition(ctx, pgdb, "UserRenameFailed",
+				fmt.Sprintf("Failed to rename user %q to %q: %v", prev, userName, err))
+			return ctrl.Result{RequeueAfter: errorRequeueInterval}, nil
+		}
+	}
+
+	if prev := pgdb.Status.DatabaseName; prev != "" && prev != dbName {
+		if err := r.handleDatabaseRename(ctx, pgClient, prev, dbName, provenance); err != nil {
+			var renameConflict *errRenameConflict
+			var notOwned *postgres.ErrNotOwned
+			if errors.As(err, &renameConflict) || errors.As(err, &notOwned) {
+				log.Error(err, "permanent conflict renaming database", "from", prev, "to", dbName)
+				r.setNotReadyCondition(ctx, pgdb, "Conflict", err.Error())
+				r.Recorder.Eventf(pgdb, corev1.EventTypeWarning, "Conflict", "%v", err)
+				return ctrl.Result{}, nil
+			}
+			log.Error(err, "failed to rename database", "from", prev, "to", dbName)
+			r.setNotReadyCondition(ctx, pgdb, "DatabaseRenameFailed",
+				fmt.Sprintf("Failed to rename database %q to %q: %v", prev, dbName, err))
+			return ctrl.Result{RequeueAfter: errorRequeueInterval}, nil
+		}
+	}
+
 	// 6. Provision user
 	password, err := r.ensureUser(ctx, pgdb, pgClient, userName, secretName, provenance)
 	if err != nil {
@@ -328,6 +363,71 @@ func (r *PostgresDatabaseReconciler) ensureDatabase(
 	}
 
 	return nil
+}
+
+// errRenameConflict is returned when both old and new PG resource names exist simultaneously.
+type errRenameConflict struct{ msg string }
+
+func (e *errRenameConflict) Error() string { return e.msg }
+
+// handleUserRename renames a PostgreSQL user when status reflects a different name than spec.
+func (r *PostgresDatabaseReconciler) handleUserRename(
+	ctx context.Context,
+	pgClient postgres.PGClient,
+	oldName, newName, provenance string,
+) error {
+	oldExists, err := pgClient.UserExists(ctx, oldName)
+	if err != nil {
+		return err
+	}
+	newExists, err := pgClient.UserExists(ctx, newName)
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case !oldExists && !newExists:
+		return nil // ensureUser will create it
+	case !oldExists && newExists:
+		return pgClient.CheckUserProvenance(ctx, newName, provenance) // already renamed
+	case oldExists && newExists:
+		return &errRenameConflict{msg: fmt.Sprintf("rename conflict: PostgreSQL user %q and %q both exist", oldName, newName)}
+	default: // oldExists && !newExists
+		if err := pgClient.CheckUserProvenance(ctx, oldName, provenance); err != nil {
+			return err
+		}
+		return pgClient.RenameUser(ctx, oldName, newName)
+	}
+}
+
+// handleDatabaseRename renames a PostgreSQL database when status reflects a different name than spec.
+func (r *PostgresDatabaseReconciler) handleDatabaseRename(
+	ctx context.Context,
+	pgClient postgres.PGClient,
+	oldName, newName, provenance string,
+) error {
+	oldExists, err := pgClient.DatabaseExists(ctx, oldName)
+	if err != nil {
+		return err
+	}
+	newExists, err := pgClient.DatabaseExists(ctx, newName)
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case !oldExists && !newExists:
+		return nil // ensureDatabase will create it
+	case !oldExists && newExists:
+		return pgClient.CheckDatabaseProvenance(ctx, newName, provenance) // already renamed
+	case oldExists && newExists:
+		return &errRenameConflict{msg: fmt.Sprintf("rename conflict: PostgreSQL database %q and %q both exist", oldName, newName)}
+	default: // oldExists && !newExists
+		if err := pgClient.CheckDatabaseProvenance(ctx, oldName, provenance); err != nil {
+			return err
+		}
+		return pgClient.RenameDatabase(ctx, oldName, newName)
+	}
 }
 
 // ensureSecret creates or updates the output Kubernetes secret.

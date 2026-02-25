@@ -38,6 +38,8 @@ type PGClient interface {
 	CheckDatabaseProvenance(ctx context.Context, dbname, expectedProvenance string) error
 	DropDatabase(ctx context.Context, dbname string) error
 	DropUser(ctx context.Context, username string) error
+	RenameUser(ctx context.Context, oldName, newName string) error
+	RenameDatabase(ctx context.Context, oldName, newName string) error
 }
 
 // Client wraps a PostgreSQL connection for provisioning operations.
@@ -149,6 +151,26 @@ func (c *Client) DropUser(ctx context.Context, username string) error {
 	sql := fmt.Sprintf("DROP ROLE IF EXISTS %s", quoteIdentifier(username))
 	if _, err := c.conn.Exec(ctx, sql); err != nil {
 		return fmt.Errorf("dropping user %q: %w", username, err)
+	}
+	return nil
+}
+
+// RenameUser renames an existing PostgreSQL role.
+func (c *Client) RenameUser(ctx context.Context, oldName, newName string) error {
+	sql := fmt.Sprintf("ALTER ROLE %s RENAME TO %s",
+		quoteIdentifier(oldName), quoteIdentifier(newName))
+	if _, err := c.conn.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("renaming user %q to %q: %w", oldName, newName, err)
+	}
+	return nil
+}
+
+// RenameDatabase renames an existing PostgreSQL database.
+func (c *Client) RenameDatabase(ctx context.Context, oldName, newName string) error {
+	sql := fmt.Sprintf("ALTER DATABASE %s RENAME TO %s",
+		quoteIdentifier(oldName), quoteIdentifier(newName))
+	if _, err := c.conn.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("renaming database %q to %q: %w", oldName, newName, err)
 	}
 	return nil
 }
