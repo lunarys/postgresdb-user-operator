@@ -1,0 +1,6 @@
+apiVersion: postgres.crds.lunarys.lab/v1alpha1
+kind: PostgresDatabase
+metadata:
+  name: testdb
+spec:
+  deletionPolicy: Delete
