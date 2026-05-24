@@ -5,6 +5,7 @@ on:
     workflows: ["CI"]
     branches: [main]
     types: [completed]
+  workflow_dispatch:
 
 concurrency:
   group: release
@@ -14,7 +15,10 @@ jobs:
   release:
     name: Semantic Release
     runs-on: ubuntu-latest
-    if: github.event.workflow_run.conclusion == 'success'
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       contains(github.event.workflow_run.head_commit.message, '[skip release]') == false)
     permissions:
       contents: write
       issues: write
