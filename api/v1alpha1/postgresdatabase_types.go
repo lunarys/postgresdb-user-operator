@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // DeletionPolicy defines what happens to the PostgreSQL database and user when the CR is deleted.
@@ -135,5 +136,9 @@ type PostgresDatabaseList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&PostgresDatabase{}, &PostgresDatabaseList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &PostgresDatabase{}, &PostgresDatabaseList{})
+		metav1.AddToGroupVersion(s, GroupVersion)
+		return nil
+	})
 }
