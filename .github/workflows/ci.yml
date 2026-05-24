@@ -78,7 +78,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - uses: helm/kind-action@v1
         with:
           install_only: true
