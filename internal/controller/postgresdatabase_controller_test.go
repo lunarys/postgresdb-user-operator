@@ -242,8 +242,8 @@ func createSuperuserSecret(ctx context.Context) {
 			Namespace: testClusterNamespace,
 		},
 		Data: map[string][]byte{
-			"username": []byte("postgres"),
-			"password": []byte("supersecret"),
+			secretKeyUsername: []byte("postgres"),
+			secretKeyPassword: []byte("supersecret"),
 		},
 	}
 	// Create the namespace first if needed
@@ -343,7 +343,7 @@ func getOutputSecret(ctx context.Context, crName string) *corev1.Secret {
 
 // cnpgClusterGVK is the GVK for a CNPG Cluster object.
 var cnpgClusterGVK = schema.GroupVersionKind{
-	Group:   "postgresql.cnpg.io",
+	Group:   cnpgGroup,
 	Version: "v1",
 	Kind:    "Cluster",
 }
@@ -380,8 +380,8 @@ func createSuperuserSecretFor(ctx context.Context, clusterName, namespace string
 			Namespace: namespace,
 		},
 		Data: map[string][]byte{
-			"username": []byte("postgres"),
-			"password": []byte("supersecret"),
+			secretKeyUsername: []byte("postgres"),
+			secretKeyPassword: []byte("supersecret"),
 		},
 	}
 	Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, secret))).To(Succeed())
@@ -435,7 +435,7 @@ var _ = Describe("PostgresDatabase Controller", func() {
 
 			// Output secret exists
 			secret := getOutputSecret(ctx, "basic-test")
-			Expect(secret.Data["username"]).To(Equal([]byte("basic_test")))
+			Expect(secret.Data[secretKeyUsername]).To(Equal([]byte("basic_test")))
 			Expect(secret.Data["dbname"]).To(Equal([]byte("basic_test")))
 			Expect(secret.Data["host"]).NotTo(BeEmpty())
 		})
@@ -627,8 +627,8 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			secret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: "custom-su", Namespace: testClusterNamespace},
 				Data: map[string][]byte{
-					"username": []byte("postgres"),
-					"password": []byte("supersecret"),
+					secretKeyUsername: []byte("postgres"),
+					secretKeyPassword: []byte("supersecret"),
 				},
 			}
 			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
@@ -833,13 +833,13 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			Expect(secret.Type).To(Equal(corev1.SecretTypeBasicAuth))
 
 			// All expected keys
-			for _, key := range []string{"username", "password", "host", "port", "dbname", "uri", "jdbc-uri", "pgpass"} {
+			for _, key := range []string{secretKeyUsername, secretKeyPassword, "host", "port", "dbname", "uri", "jdbc-uri", "pgpass"} {
 				Expect(secret.Data).To(HaveKey(key), "missing key: "+key)
 				Expect(secret.Data[key]).NotTo(BeEmpty(), "empty key: "+key)
 			}
 
 			// Values
-			Expect(string(secret.Data["username"])).To(Equal("secret_format"))
+			Expect(string(secret.Data[secretKeyUsername])).To(Equal("secret_format"))
 			Expect(string(secret.Data["dbname"])).To(Equal("secret_format"))
 			Expect(string(secret.Data["host"])).To(Equal(
 				fmt.Sprintf("%s-rw.%s.svc.cluster.local", testClusterName, testClusterNamespace)))
@@ -1029,7 +1029,7 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			pgdb = refreshResource(ctx, nn)
 			Expect(pgdb.Status.Username).To(Equal("new_user"))
 			secret := getOutputSecret(ctx, "rename-user")
-			Expect(string(secret.Data["username"])).To(Equal("new_user"))
+			Expect(string(secret.Data[secretKeyUsername])).To(Equal("new_user"))
 		})
 
 		It("should rename the PostgreSQL database when spec.databaseName changes", func() {
@@ -1163,7 +1163,7 @@ var _ = Describe("PostgresDatabase Controller", func() {
 			// New secret should exist with correct credentials
 			newSecret := &corev1.Secret{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "new-creds", Namespace: testNamespace}, newSecret)).To(Succeed())
-			Expect(string(newSecret.Data["username"])).To(Equal("rename_secret"))
+			Expect(string(newSecret.Data[secretKeyUsername])).To(Equal("rename_secret"))
 		})
 	})
 })

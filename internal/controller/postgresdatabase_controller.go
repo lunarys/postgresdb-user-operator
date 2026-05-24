@@ -55,6 +55,11 @@ const (
 	conditionUserReady     = "UserReady"
 	conditionDatabaseReady = "DatabaseReady"
 	conditionSecretReady   = "SecretReady"
+
+	reasonProvisioned = "Provisioned"
+	cnpgGroup         = "postgresql.cnpg.io"
+	secretKeyUsername = "username"
+	secretKeyPassword = "password"
 )
 
 // ConnectFunc creates a PGClient from a connection string.
@@ -177,12 +182,12 @@ func (r *PostgresDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if err != nil {
 		var notOwned *postgres.ErrNotOwned
 		if errors.As(err, &notOwned) {
-			log.Error(err, "resource conflict", "username", userName)
+			log.Error(err, "resource conflict", secretKeyUsername, userName)
 			r.setNotReadyCondition(ctx, pgdb, "Conflict", err.Error())
 			r.Recorder.Eventf(pgdb, corev1.EventTypeWarning, "Conflict", "%v", err)
 			return ctrl.Result{}, nil // permanent error — don't requeue
 		}
-		log.Error(err, "failed to provision user", "username", userName)
+		log.Error(err, "failed to provision user", secretKeyUsername, userName)
 		r.setNotReadyCondition(ctx, pgdb, "UserProvisionFailed",
 			fmt.Sprintf("Failed to provision user %q: %v", userName, err))
 		r.Recorder.Eventf(pgdb, corev1.EventTypeWarning, "UserProvisionFailed",
@@ -192,7 +197,7 @@ func (r *PostgresDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	meta.SetStatusCondition(&pgdb.Status.Conditions, metav1.Condition{
 		Type:    conditionUserReady,
 		Status:  metav1.ConditionTrue,
-		Reason:  "Provisioned",
+		Reason:  reasonProvisioned,
 		Message: fmt.Sprintf("User %q exists", userName),
 	})
 
@@ -215,7 +220,7 @@ func (r *PostgresDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	meta.SetStatusCondition(&pgdb.Status.Conditions, metav1.Condition{
 		Type:    conditionDatabaseReady,
 		Status:  metav1.ConditionTrue,
-		Reason:  "Provisioned",
+		Reason:  reasonProvisioned,
 		Message: fmt.Sprintf("Database %q exists with owner %q", dbName, userName),
 	})
 
@@ -249,7 +254,7 @@ func (r *PostgresDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	meta.SetStatusCondition(&pgdb.Status.Conditions, metav1.Condition{
 		Type:    conditionReady,
 		Status:  metav1.ConditionTrue,
-		Reason:  "Provisioned",
+		Reason:  reasonProvisioned,
 		Message: "Database, user, and secret are ready",
 	})
 	pgdb.Status.DatabaseName = dbName
@@ -260,7 +265,7 @@ func (r *PostgresDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
-	r.Recorder.Event(pgdb, corev1.EventTypeNormal, "Provisioned",
+	r.Recorder.Event(pgdb, corev1.EventTypeNormal, reasonProvisioned,
 		"Database, user, and secret are ready")
 
 	// 10. Requeue for drift detection
@@ -299,7 +304,7 @@ func (r *PostgresDatabaseReconciler) ensureUser(
 
 	if exists && secretExists {
 		// User and secret exist — keep current password
-		return string(existingSecret.Data["password"]), nil
+		return string(existingSecret.Data[secretKeyPassword]), nil
 	}
 
 	// Generate a new password (either user is new or secret was deleted)
@@ -313,13 +318,13 @@ func (r *PostgresDatabaseReconciler) ensureUser(
 		if err := pgClient.CreateUser(ctx, userName, password, provenance); err != nil {
 			return "", err
 		}
-		log.Info("created PostgreSQL user", "username", userName)
+		log.Info("created PostgreSQL user", secretKeyUsername, userName)
 	} else {
 		// User exists (and provenance matched) but secret is gone — reset password
 		if err := pgClient.UpdatePassword(ctx, userName, password); err != nil {
 			return "", err
 		}
-		log.Info("reset password for PostgreSQL user (output secret was deleted)", "username", userName)
+		log.Info("reset password for PostgreSQL user (output secret was deleted)", secretKeyUsername, userName)
 	}
 
 	return password, nil
@@ -566,7 +571,7 @@ func (r *PostgresDatabaseReconciler) findClusterBySelector(ctx context.Context) 
 
 	clusterList := &unstructured.UnstructuredList{}
 	clusterList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "postgresql.cnpg.io",
+		Group:   cnpgGroup,
 		Version: "v1",
 		Kind:    "ClusterList",
 	})
@@ -599,7 +604,7 @@ func (r *PostgresDatabaseReconciler) connectToCluster(
 	// Override with spec.superuserSecret.name if the CNPG Cluster object exists and has it set.
 	cluster := &unstructured.Unstructured{}
 	cluster.SetGroupVersionKind(schema.GroupVersionKind{
-		Group: "postgresql.cnpg.io", Version: "v1", Kind: "Cluster",
+		Group: cnpgGroup, Version: "v1", Kind: "Cluster",
 	})
 	if err := r.Get(ctx, types.NamespacedName{Name: clusterRef.Name, Namespace: clusterRef.Namespace}, cluster); err == nil {
 		if name, found, _ := unstructured.NestedString(cluster.Object, "spec", "superuserSecret", "name"); found && name != "" {
@@ -615,8 +620,8 @@ func (r *PostgresDatabaseReconciler) connectToCluster(
 		return nil, "", "", err
 	}
 
-	suUser := string(suSecret.Data["username"])
-	suPass := string(suSecret.Data["password"])
+	suUser := string(suSecret.Data[secretKeyUsername])
+	suPass := string(suSecret.Data[secretKeyPassword])
 	host := fmt.Sprintf("%s-rw.%s.svc.cluster.local",
 		clusterRef.Name, clusterRef.Namespace)
 	port := "5432"
@@ -689,14 +694,14 @@ func buildSecretData(host, port, dbName, userName, password string) map[string][
 		host, port, dbName, url.QueryEscape(userName), url.QueryEscape(password))
 
 	return map[string][]byte{
-		"username": []byte(userName),
-		"password": []byte(password),
-		"host":     []byte(host),
-		"port":     []byte(port),
-		"dbname":   []byte(dbName),
-		"pgpass":   []byte(pgpass),
-		"uri":      []byte(uri),
-		"jdbc-uri": []byte(jdbcURI),
+		secretKeyUsername: []byte(userName),
+		secretKeyPassword: []byte(password),
+		"host":            []byte(host),
+		"port":            []byte(port),
+		"dbname":          []byte(dbName),
+		"pgpass":          []byte(pgpass),
+		"uri":             []byte(uri),
+		"jdbc-uri":        []byte(jdbcURI),
 	}
 }
 
