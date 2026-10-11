@@ -180,8 +180,7 @@ func (r *PostgresDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// 6. Provision user
 	password, err := r.ensureUser(ctx, pgdb, pgClient, userName, secretName, provenance)
 	if err != nil {
-		var notOwned *postgres.ErrNotOwned
-		if errors.As(err, &notOwned) {
+		if _, ok := errors.AsType[*postgres.ErrNotOwned](err); ok {
 			log.Error(err, "resource conflict", secretKeyUsername, userName)
 			r.setNotReadyCondition(ctx, pgdb, "Conflict", err.Error())
 			r.Recorder.Eventf(pgdb, corev1.EventTypeWarning, "Conflict", "%v", err)
@@ -203,8 +202,7 @@ func (r *PostgresDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	// 7. Provision database
 	if err := r.ensureDatabase(ctx, pgClient, dbName, userName, provenance); err != nil {
-		var notOwned *postgres.ErrNotOwned
-		if errors.As(err, &notOwned) {
+		if _, ok := errors.AsType[*postgres.ErrNotOwned](err); ok {
 			log.Error(err, "resource conflict", "database", dbName)
 			r.setNotReadyCondition(ctx, pgdb, "Conflict", err.Error())
 			r.Recorder.Eventf(pgdb, corev1.EventTypeWarning, "Conflict", "%v", err)
