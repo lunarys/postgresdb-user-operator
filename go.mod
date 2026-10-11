@@ -3,7 +3,7 @@ module github.com/lunarys/postgresdb-user-provisioner
 go 1.26.0
 
 require (
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/onsi/ginkgo/v2 v2.32.1
 	github.com/onsi/gomega v1.42.1
 	k8s.io/api v0.37.1
